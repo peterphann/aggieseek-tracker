@@ -41,3 +41,9 @@ twilio==9.2.3
 uritemplate==4.1.1
 urllib3==2.2.2
 yarl==1.9.4
+
+bs4~=0.0.2
+beautifulsoup4~=4.12.3
+soupsieve~=2.6
+pip~=23.2.1
+setuptools~=68.1.2

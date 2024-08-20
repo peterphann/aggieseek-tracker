@@ -7,6 +7,7 @@ import notifications
 import embed
 import concurrent.futures
 from datetime import datetime
+import section as sec
 
 def configure_logging() -> None:
     logging.getLogger().setLevel(logging.INFO)
@@ -15,13 +16,22 @@ def configure_logging() -> None:
 class SectionMonitor:
     def __init__(self, certificate_path, database_url):
         self.cred = credentials.Certificate(certificate_path)
-        self.duplicates = set()
-        self.sections = {}
         firebase_admin.initialize_app(self.cred, {
             'databaseURL': database_url
         })
-        self.run = db.reference(f'runs/{datetime.strftime(datetime.utcnow(), "%Y-%m-%dT%H:%M:%SZ")}/')
-        self.run.set(-1)
+
+        self.duplicates = set()
+        self.crns = self.get_tracked_sections()
+        self.sections = db.reference('sections/').get()
+        self.settings = db.reference('settings/').get()
+        self.users = db.reference('users/').get()
+        self.timestamp = datetime.strftime(datetime.utcnow(), "%Y-%m-%dT%H:%M:%SZ")
+        self.run = db.reference(f'runs/{self.timestamp}/')
+        self.run.set({
+            'time': -1,
+            'num_sections': len(self.crns),
+            'settings': self.settings
+        })
 
     def get_tracked_sections(self):
         ref = db.reference('sections/')
@@ -29,7 +39,7 @@ class SectionMonitor:
         return sections
 
     def log_time(self, time):
-        self.run.set(time)
+        db.reference(f'runs/{self.timestamp}/time').set(time)
 
     def get_section(self, crn) -> {}:
         section_url = f'https://api.aggieseek.net/sections/202431/{crn}/'
@@ -41,17 +51,12 @@ class SectionMonitor:
 
         return request.json()
 
-    def check_batch(self, batch):
-        sections = self.get_section(batch)
-        for section in sections:
-            self.sections[section['crn']] = section
-            self.check_change(section['crn'])
-
     def check_change(self, crn):
-        seats_ref = db.reference(f'sections/{crn}/seats')
         users_ref = db.reference(f'sections/{crn}/users')
+        seats_ref = db.reference(f'sections/{crn}/seats')
 
-        section = self.sections[crn]
+        section = sec.scrape_section(202431, crn)
+
         if users_ref.get() is None:
             logging.info(f'Section {crn} has no active users, removing')
             db.reference(f'sections/{crn}').delete()
@@ -61,18 +66,13 @@ class SectionMonitor:
             return
 
         logging.info(f'Checking section {crn}, {section["course"]} - {section["title"]}')
-        prev_seats = seats_ref.get()
+        prev_seats = self.sections[crn]['seats']
         curr_seats = section['seats']['remaining']
 
         seats_ref.set(curr_seats)
 
         if prev_seats != curr_seats and prev_seats is not None:
             self.notify(crn, prev_seats)
-
-    def get_firebase_settings(self):
-        settings_ref = db.reference('settings/')
-        settings = settings_ref.get()
-        return settings
 
     def notify(self, crn, prev):
         ref = db.reference(f'sections/{crn}/users')
@@ -115,18 +115,14 @@ def handler(event, context):
     monitor = SectionMonitor('aggieseek-firebase-adminsdk-4uuf9-c5ed290f9a.json',
                              'https://aggieseek-default-rtdb.firebaseio.com')
 
-    settings = monitor.get_firebase_settings()
+    settings = monitor.settings
 
     logging.info(settings)
     crns = list(monitor.get_tracked_sections())
-    batch_size = settings['server_batch_size']
-
-    batches = [crns[i:i + batch_size] for i in range(0, len(crns), batch_size)]
-    batches = [','.join(batch) for batch in batches]
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=settings['executor_workers']) as executor:
-        for batch in batches:
-            executor.submit(monitor.check_batch, batch)
+        for crn in crns:
+            executor.submit(monitor.check_change, crn)
 
     runtime = float(f'{time.time() - start:.2f}')
     monitor.log_time(runtime)
