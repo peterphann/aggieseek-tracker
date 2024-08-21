@@ -12,14 +12,13 @@ import section as sec
 def configure_logging() -> None:
     logging.getLogger().setLevel(logging.INFO)
 
-
 class SectionMonitor:
     def __init__(self, certificate_path, database_url):
-        self.cred = credentials.Certificate(certificate_path)
-        firebase_admin.initialize_app(self.cred, {
-            'databaseURL': database_url
-        })
-
+        if not firebase_admin._apps:
+            self.cred = credentials.Certificate(certificate_path)
+            firebase_admin.initialize_app(self.cred, {
+                'databaseURL': database_url
+            })
         self.duplicates = set()
         self.crns = self.get_tracked_sections()
         self.sections = db.reference('sections/').get()
