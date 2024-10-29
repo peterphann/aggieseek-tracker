@@ -1,132 +1,135 @@
 import time
 import firebase_admin
 from firebase_admin import credentials, db
-import requests
 import logging
 import notifications
 import embed
-import concurrent.futures
-from datetime import datetime
-import section as sec
+from logging_config import init_logging
+from datetime import datetime, timezone
+from section import get_section_info
+import os
+import asyncio
+from dotenv import load_dotenv
 
-def configure_logging() -> None:
-    logging.getLogger().setLevel(logging.INFO)
+load_dotenv(override=True)
+CURRENT_TERM = os.getenv('CURRENT_TERM')
+BATCH_SIZE = int(os.getenv('BATCH_SIZE'), 10)
+
+def split_list(arr, batch_size):
+    return [arr[i:i + batch_size] for i in range(0, len(arr), batch_size)]
 
 class SectionMonitor:
-    def __init__(self, certificate_path, database_url):
+    def __init__(self, term):
+
         if not firebase_admin._apps:
-            self.cred = credentials.Certificate(certificate_path)
-            firebase_admin.initialize_app(self.cred, {
-                'databaseURL': database_url
+            cred = credentials.Certificate(os.getenv('CERTIFICATE_PATH'))
+            firebase_admin.initialize_app(cred, {
+                'databaseURL': os.getenv('DATABASE_URL')
             })
-        self.duplicates = set()
+
+        self.term = term
         self.crns = self.get_tracked_sections()
-        self.sections = db.reference('sections/').get()
-        self.settings = db.reference('settings/').get()
+        self.sections = db.reference(f'sections/{self.term}/').get()
         self.users = db.reference('users/').get()
-        self.timestamp = datetime.strftime(datetime.utcnow(), "%Y-%m-%dT%H:%M:%SZ")
-        self.run = db.reference(f'runs/{self.timestamp}/')
-        self.run.set({
-            'time': -1,
-            'num_sections': len(self.crns),
-            'settings': self.settings
-        })
+        self.start_time = datetime.strftime(datetime.now(timezone.utc), "%Y-%m-%dT%H:%M:%SZ")
 
     def get_tracked_sections(self):
-        ref = db.reference('sections/')
+        ref = db.reference(f'sections/{self.term}/')
+        if not ref.get():
+            return []
         sections = ref.get().keys()
         return sections
-
-    def log_time(self, time):
-        db.reference(f'runs/{self.timestamp}/time').set(time)
-
-    def get_section(self, crn) -> {}:
-        section_url = f'https://api.aggieseek.net/sections/202431/{crn}/'
-        request = requests.get(section_url)
-
-        if request.status_code != 200:
-            logging.error(f'Failed to get section {crn}')
-            return False
-
-        return request.json()
-
-    def check_change(self, crn):
-        users_ref = db.reference(f'sections/{crn}/users')
-        seats_ref = db.reference(f'sections/{crn}/seats')
-
-        section = sec.scrape_section(202431, crn)
-
-        if users_ref.get() is None:
-            logging.info(f'Section {crn} has no active users, removing')
-            db.reference(f'sections/{crn}').delete()
-            return
+    
+    async def check_change(self, crn):
+        section = await get_section_info(self.term, crn)
         if not section:
-            logging.info(f'Section {crn} is invalid')
+            logging.info(f'Section {crn} is invalid, skipping over')
             return
+        
+        logging.info(f'Fetched section {crn}, {section["SUBJECT_CODE"]} {section["COURSE_NUMBER"]} - {section["COURSE_TITLE"]}')
+        
+        crn = section['CRN']
+        seats_ref = db.reference(f'sections/{self.term}/{crn}/seats')
 
-        logging.info(f'Checking section {crn}, {section["course"]} - {section["title"]}')
-        prev_seats = self.sections[crn]['seats']
-        curr_seats = section['seats']['remaining']
-
-        seats_ref.set(curr_seats)
-
-        if prev_seats != curr_seats and prev_seats is not None:
-            self.notify(crn, prev_seats)
-
-    def notify(self, crn, prev):
-        ref = db.reference(f'sections/{crn}/users')
-
-        section = self.sections[crn]
-        logging.info(f'Detected change in section {crn}, from {prev} to {section["seats"]["remaining"]}')
-        users = ref.get()
-        if not section:
+        if self.sections[crn].get('users', None) is None:
+            logging.info(f'Section {crn} has no active users, removing from database')
+            db.reference(f'sections/{self.term}/{crn}').delete()
             return
+        
+        prev_seats = self.sections[crn].get('seats', None)
+        curr_seats = section['SEATS']['REMAINING']
 
-        discord_embed = embed.update_embed(section, prev)
-        for user in users:
-            user_ref = db.reference(f'users/{user}/methods')
-            methods = user_ref.get()
+        if prev_seats != curr_seats:
+            seats_ref.set(curr_seats)
+            if prev_seats is None:
+                return
+            logging.info(f'Change detected in section {crn}, {section["SUBJECT_CODE"]} {section["COURSE_NUMBER"]} - {section["COURSE_TITLE"]}, {prev_seats} to {curr_seats}')
+            self.notify(crn, prev_seats, section)
 
-            notifications.generate_notification(user, section, prev)
+    def notify(self, crn, prev, section):
+        curr = section["SEATS"]["REMAINING"]
+        logging.info(f'Detected change in section {crn}, from {prev} to {curr}')
+
+        tracking_users = self.sections[crn].get('users', {})
+
+        for uid in tracking_users:
+            user = self.users[uid]
+            if 'methods' not in user:
+                continue
+
+            noti_mode = "all" # Default notification mode if user doesn't have one selected
+            methods = user['methods'] 
+            if 'settings' in user:
+                noti_mode = user['settings'].get('notificationMode', 'all')
+
+            if noti_mode != "all" and not (prev <= 0 < curr):
+                continue
+
+            notifications.generate_notification(uid, section, prev)
 
             if methods['discord']['enabled']:
                 webhook_url = methods['discord']['value']
+                discord_embed = embed.update_embed(section, prev)
 
-                instance = (crn, webhook_url)
-                if instance not in self.duplicates:
-                    status_code = notifications.send_discord(webhook_url, discord_embed)
-                    logging.info(f'Discord alert sent to user {user}, status code {status_code}')
-                    self.duplicates.add(instance)
+                status_code = notifications.send_discord(webhook_url, discord_embed)
+                if status_code != 200 and status_code != 204:
+                    logging.warning(f'Discord alert sent to user {uid}, status code {status_code}')
+                else:
+                    logging.info(f'Discord alert sent to user {uid}, status code {status_code}')
 
             if methods['phone']['enabled']:
                 phone_number = methods['phone']['value']
                 notifications.send_message(phone_number, section, prev)
-                logging.info(f'Phone alert sent to user {user}')
+                logging.info(f'Phone alert sent to user {uid}, {phone_number}')
 
             if methods['email']['enabled']:
                 # TODO: Handle email alert
-                logging.info(f'Email alert sent to user {user}')
+                email_address = methods['email']['value']
+                logging.info(f'Email alert sent to user {uid}, {email_address}')
 
-
-def handler(event, context):
-    start = time.time()
-    configure_logging()
-    monitor = SectionMonitor('aggieseek-firebase-adminsdk-4uuf9-c5ed290f9a.json',
-                             'https://aggieseek-default-rtdb.firebaseio.com')
-
-    settings = monitor.settings
-
-    logging.info(settings)
+def main():
+    init_logging()
+    monitor = SectionMonitor(CURRENT_TERM)
     crns = list(monitor.get_tracked_sections())
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=settings['executor_workers']) as executor:
+    batches = split_list(crns, BATCH_SIZE)
+    
+    async def monitor_sections(crns):
+        tasks = []
         for crn in crns:
-            executor.submit(monitor.check_change, crn)
+            tasks.append(monitor.check_change(crn))
+        await asyncio.gather(*tasks)
+        logging.info(f'Checked batch {crns} in {time.time() - start_time:.2f} secs')
 
-    runtime = float(f'{time.time() - start:.2f}')
-    monitor.log_time(runtime)
-    logging.info(f'Finished in {runtime} seconds.')
+    start_time = time.time()
+    for batch in batches:
+        try:
+            asyncio.run(monitor_sections(batch))
+        except Exception as e:
+            logging.critical(f'Exception raised while running batch: {e}')
 
+    runtime = time.time() - start_time
+    logging.info(f'RUN FINISHED: {runtime:.2f} secs / {len(crns)} sections | {len(crns) / runtime:.2f} sections / sec | {BATCH_SIZE} batch size')
 
 if __name__ == '__main__':
-    handler(None, None)
+    main()
+    
