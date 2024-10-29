@@ -1,67 +1,76 @@
 from bs4 import BeautifulSoup
-import requests
+import aiohttp
+import logging
+import json
 
-session = requests.Session()
+# GPT written helper
+def recursive_parse_json(json_str):
+    try:
+        # Try parsing the string as JSON
+        parsed = json.loads(json_str)
+        
+        # If it's a dictionary, recursively parse its values
+        if isinstance(parsed, dict):
+            return {k: recursive_parse_json(v) for k, v in parsed.items()}
+        # If it's a list, recursively parse each element
+        elif isinstance(parsed, list):
+            return [recursive_parse_json(element) for element in parsed]
+        else:
+            return parsed
+    except (json.JSONDecodeError, TypeError):
+        # If parsing fails, return the original string
+        return json_str
 
-
-def parse_soup(soup: BeautifulSoup, term, crn) -> dict:
+def parse_soup(soup: BeautifulSoup) -> dict:
     all_fields = soup.find_all('td', class_='dddefault')
 
     if len(all_fields) == 0:
-        return {'crn': int(crn), 'status': 400}
+        return {}
 
-    static_headers = soup.find('div', class_='staticheaders').text
-    term_and_campus = static_headers.split('\n')[1]
-    full_term = ' '.join(term_and_campus.split()[:2])
-    full_course_name = soup.find('th', class_='ddlabel').text
-    split_name = full_course_name.split(' - ')
-
-    course = split_name[2]
-
-    professor = scrape_instructor(split_name[2], term, crn)
     return {
-        'seats': {
-            'actual': int(all_fields[2].text),
-            'capacity': int(all_fields[1].text),
-            'remaining': int(all_fields[3].text)
+        'SEATS': {
+            'ACTUAL': int(all_fields[2].text),
+            'CAPACITY': int(all_fields[1].text),
+            'REMAINING': int(all_fields[3].text)
         },
-        'crn': int(split_name[1]),
-        'title': split_name[0],
-        'course': course,
-        'section': int(split_name[3]),
-        'term': full_term,
-        'professor': professor,
-        'status': 200
     }
 
+async def get_section_info(term, crn):
+    result = {}
+    instructor = 'Not assigned'
 
-def scrape_instructor(course, term, crn) -> str:
-    subject = course.split()[0]
-    number = course.split()[1]
-    instructor_url = f'https://compass-ssb.tamu.edu/pls/PROD/bwykschd.p_disp_listcrse?term_in={term}&subj_in={subject}&crse_in={number}&crn_in={crn}'
+    async with aiohttp.ClientSession() as session:
+        howdy_url = f'https://howdy.tamu.edu/api/course-section-details?term={term}&subject=&course=&crn={crn}'
+        compass_url = f'https://compass-ssb.tamu.edu/pls/PROD/bwykschd.p_disp_detail_sched?term_in={term}&crn_in={crn}'
+        instructor_url = 'https://howdy.tamu.edu/api/section-meeting-times-with-profs'
 
-    request = session.get(instructor_url)
-    if request.status_code != 200: return ""
-    instructor_soup = BeautifulSoup(request.text, 'html.parser')
+        async with session.get(howdy_url) as response:
+            if response.status != 200:
+                logging.warning(f'Could not fetch CRN {crn} from Howdy.')
+                return {}
 
-    instructor_name = instructor_soup.find_all('td', class_='dddefault')[7].text
-    instructor_name = instructor_name.removesuffix(' (P)')
-    return instructor_name
+            result = await response.json()
 
+            if not result:
+                logging.warning(f'Could not fetch CRN {crn} from Howdy.')
+                return {}
+            
+        async with session.post(instructor_url, json={"term": term, "subject": None, "course": None, "crn": crn}) as response:
+            instructor_result = await response.json()
+            if instructor_result and instructor_result.get('SWV_CLASS_SEARCH_INSTRCTR_JSON', None):
+                unparsed_json = instructor_result['SWV_CLASS_SEARCH_INSTRCTR_JSON']
+                parsed_json = recursive_parse_json(unparsed_json)[0]
+                instructor = parsed_json['NAME'].rstrip('(P)')
+        
+        async with session.get(compass_url) as response:
+            try:
+                soup = BeautifulSoup(await response.text(), 'html.parser')
+                seats = parse_soup(soup)
 
-def scrape_section(term, crn) -> dict:
-    url = f'https://compass-ssb.tamu.edu/pls/PROD/bwykschd.p_disp_detail_sched?term_in={term}&crn_in={crn}'
+                result.update(seats)
+            except Exception as e:
+                logging.error(f'Error while parsing CRN {crn} from Compass.')
+                return {}
 
-    try:
-        page = session.get(url)
-        page.raise_for_status()
-    except requests.HTTPError as e:
-        return {'crn': crn}
-
-    if page.status_code != 200:
-        return {'crn': crn}
-
-    soup = BeautifulSoup(page.text, 'html.parser')
-    course_info = parse_soup(soup, term, crn)
-
-    return course_info
+        result.update({'INSTRUCTOR': instructor})
+        return result
