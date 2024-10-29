@@ -6,7 +6,7 @@ attrs==24.1.0
 CacheControl==0.14.0
 cachetools==5.4.0
 certifi==2024.7.4
-cffi==1.16.0
+cffi==1.17.1
 charset-normalizer==3.3.2
 cryptography==43.0.0
 firebase-admin==6.5.0
@@ -46,4 +46,4 @@ bs4~=0.0.2
 beautifulsoup4~=4.12.3
 soupsieve~=2.6
 pip~=23.2.1
-setuptools~=68.1.2
+setuptools~=49.6.0
