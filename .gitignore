@@ -3,3 +3,6 @@ env
 venv
 .env
 .idea
+.pyc
+__pycache__
+.DS_Store
