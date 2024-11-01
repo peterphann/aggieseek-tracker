@@ -2,10 +2,8 @@ import time
 import firebase_admin
 from firebase_admin import credentials, db
 import logging
-import notifications
-import embed
+from notifications import SeatNotification, InstructorNotification, NotiType, generate_seat_web, generate_instructor_web
 from logging_config import init_logging
-from datetime import datetime, timezone
 from section import get_section_info
 import os
 import asyncio
@@ -14,6 +12,8 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 CURRENT_TERM = os.getenv('CURRENT_TERM')
 BATCH_SIZE = int(os.getenv('BATCH_SIZE'), 10)
+CERTIFICATE_PATH = os.getenv('CERTIFICATE_PATH')
+DATABASE_URL = os.getenv('DATABASE_URL')
 
 def split_list(arr, batch_size):
     return [arr[i:i + batch_size] for i in range(0, len(arr), batch_size)]
@@ -22,24 +22,18 @@ class SectionMonitor:
     def __init__(self, term):
 
         if not firebase_admin._apps:
-            cred = credentials.Certificate(os.getenv('CERTIFICATE_PATH'))
+            cred = credentials.Certificate(CERTIFICATE_PATH)
             firebase_admin.initialize_app(cred, {
-                'databaseURL': os.getenv('DATABASE_URL')
+                'databaseURL': DATABASE_URL
             })
 
         self.term = term
-        self.crns = self.get_tracked_sections()
         self.sections = db.reference(f'sections/{self.term}/').get()
         self.users = db.reference('users/').get()
-        self.start_time = datetime.strftime(datetime.now(timezone.utc), "%Y-%m-%dT%H:%M:%SZ")
 
-    def get_tracked_sections(self):
-        ref = db.reference(f'sections/{self.term}/')
-        if not ref.get():
-            return []
-        sections = ref.get().keys()
-        return sections
-    
+        self.seen = set()
+        self.notifications = []
+
     async def check_change(self, crn):
         section = await get_section_info(self.term, crn)
         if not section:
@@ -49,7 +43,6 @@ class SectionMonitor:
         logging.info(f'Fetched section {crn}, {section["SUBJECT_CODE"]} {section["COURSE_NUMBER"]} - {section["COURSE_TITLE"]}')
         
         crn = section['CRN']
-        seats_ref = db.reference(f'sections/{self.term}/{crn}/seats')
 
         if self.sections[crn].get('users', None) is None:
             logging.info(f'Section {crn} has no active users, removing from database')
@@ -58,59 +51,105 @@ class SectionMonitor:
         
         prev_seats = self.sections[crn].get('seats', None)
         curr_seats = section['SEATS']['REMAINING']
+        prev_instructor = self.sections[crn].get('instructor', None)
+        curr_instructor = section['INSTRUCTOR']
 
         if prev_seats != curr_seats:
+            seats_ref = db.reference(f'sections/{self.term}/{crn}/seats')
             seats_ref.set(curr_seats)
-            if prev_seats is None:
-                return
-            logging.info(f'Change detected in section {crn}, {section["SUBJECT_CODE"]} {section["COURSE_NUMBER"]} - {section["COURSE_TITLE"]}, {prev_seats} to {curr_seats}')
-            self.notify(crn, prev_seats, section)
+            if prev_seats is not None:
+                self.create_seats_noti(section, prev_seats, curr_seats)
 
-    def notify(self, crn, prev, section):
-        curr = section["SEATS"]["REMAINING"]
-        logging.info(f'Detected change in section {crn}, from {prev} to {curr}')
+        if prev_instructor != curr_instructor:
+            instructor_ref = db.reference(f'sections/{self.term}/{crn}/instructor')
+            instructor_ref.set(curr_instructor)
+            if prev_instructor is not None:
+                self.create_instructor_noti(section, prev_instructor, curr_instructor)
 
-        tracking_users = self.sections[crn].get('users', {})
+    def create_seats_noti(self, section, previous, current):
+        logging.info(f'Detected seats change in section {section['CRN']}, from {previous} to {current}')
+        tracking_users = self.sections[section['CRN']].get('users', {})
 
         for uid in tracking_users:
             user = self.users[uid]
             if 'methods' not in user:
+                logging.warning(f'User {uid} does not have methods field, skipping')
                 continue
 
-            noti_mode = "all" # Default notification mode if user doesn't have one selected
-            methods = user['methods'] 
-            if 'settings' in user:
-                noti_mode = user['settings'].get('notificationMode', 'all')
-
-            if noti_mode != "all" and not (prev <= 0 < curr):
+            if 'settings' not in user:
+                logging.warning(f'User {uid} does not have settings field, skipping')
                 continue
 
-            notifications.generate_notification(uid, section, prev)
+            conditions = user['settings']['notificationModes']
+
+            if (conditions['increase'] and current > previous) or (conditions['decrease'] and current < previous) or (conditions['open'] and previous <= 0 < current) or (conditions['close'] and current <= 0 < previous):
+                methods = user['methods']
+                generate_seat_web(uid, section, previous, current)
+
+                if methods['discord']['enabled']:
+                    webhook_url = methods['discord']['value']
+                    notification = SeatNotification(section, previous, current, NotiType.DISCORD, webhook_url)
+                    self.add_notification(notification)
+
+                if methods['phone']['enabled']:
+                    phone_number = methods['phone']['value']
+                    notification = SeatNotification(section, previous, current, NotiType.TEXT, phone_number)
+                    self.add_notification(notification)
+
+                if methods['email']['enabled']:
+                    email_address = methods['email']['value']
+                    notification = SeatNotification(section, previous, current, NotiType.EMAIL, email_address)
+                    self.add_notification(notification)
+
+    def create_instructor_noti(self, section, previous, current):
+        logging.info(f'Detected instructor change in section {section['CRN']}, from {previous} to {current}')
+        tracking_users = self.sections[section['CRN']].get('users', {})
+
+        for uid in tracking_users:
+            user = self.users[uid]
+            if 'methods' not in user:
+                logging.warning(f'User {uid} does not have methods field, skipping')
+                continue
+
+            if 'settings' not in user:
+                logging.warning(f'User {uid} does not have settings field, skipping')
+                continue
+
+            tracking = user['settings']['notificationModes'].get('instructors', False)
+            if not tracking: continue
+
+
+            methods = user['methods']
+            generate_instructor_web(uid, section, previous, current)
 
             if methods['discord']['enabled']:
                 webhook_url = methods['discord']['value']
-                discord_embed = embed.update_embed(section, prev)
-
-                status_code = notifications.send_discord(webhook_url, discord_embed)
-                if status_code != 200 and status_code != 204:
-                    logging.warning(f'Discord alert sent to user {uid}, status code {status_code}')
-                else:
-                    logging.info(f'Discord alert sent to user {uid}, status code {status_code}')
+                notification = InstructorNotification(section, previous, current, NotiType.DISCORD, webhook_url)
+                self.add_notification(notification)
 
             if methods['phone']['enabled']:
                 phone_number = methods['phone']['value']
-                notifications.send_message(phone_number, section, prev)
-                logging.info(f'Phone alert sent to user {uid}, {phone_number}')
+                notification = InstructorNotification(section, previous, current, NotiType.TEXT, phone_number)
+                self.add_notification(notification)
 
             if methods['email']['enabled']:
-                # TODO: Handle email alert
                 email_address = methods['email']['value']
-                logging.info(f'Email alert sent to user {uid}, {email_address}')
+                notification = InstructorNotification(section, previous, current, NotiType.EMAIL, email_address)
+                self.add_notification(notification)
+
+    def add_notification(self, notification):
+        if (notification.to_tuple() not in self.seen):
+            self.seen.add(notification.to_tuple())
+            self.notifications.append(notification)
+            
+    def send_notifications(self):
+        for notification in self.notifications:
+            notification.send()
 
 def main():
     init_logging()
     monitor = SectionMonitor(CURRENT_TERM)
-    crns = list(monitor.get_tracked_sections())
+    crns = list(monitor.sections.keys())
     batches = split_list(crns, BATCH_SIZE)
     
     async def monitor_sections(crns):
@@ -125,11 +164,11 @@ def main():
         try:
             asyncio.run(monitor_sections(batch))
         except Exception as e:
-            logging.critical(f'Exception raised while running batch: {e}')
+            logging.exception(f'Exception raised while running batch: {e}')
+    monitor.send_notifications()
 
     runtime = time.time() - start_time
     logging.info(f'RUN FINISHED: {runtime:.2f} secs / {len(crns)} sections | {len(crns) / runtime:.2f} sections / sec | {BATCH_SIZE} batch size')
 
 if __name__ == '__main__':
     main()
-    

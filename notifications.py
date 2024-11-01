@@ -1,32 +1,31 @@
+from datetime import datetime
 import requests
-from firebase_admin import db
 from twilio.rest import Client
 import os
-import embed
 from dotenv import load_dotenv
-from datetime import datetime
+from embed import seats_embed, instructor_embed
+import logging
+from firebase_admin import db
 
-load_dotenv()
+from enum import Enum
+
+load_dotenv(override=True)
+
+# Twilio keys
 ACCOUNT_SID = os.getenv(
     'ACCOUNT_SID')
 AUTH_TOKEN = os.getenv('AUTH_TOKEN')
 PHONE_NUMBER = os.getenv('PHONE_NUMBER')
-client = Client(ACCOUNT_SID, AUTH_TOKEN)
 
+# Mailgun keys
+MAILGUN_API_KEY = os.getenv('MAILGUN_API_KEY')
+MAILGUN_API_URL = "https://api.mailgun.net/v3/email.aggieseek.net/messages"
+FROM_EMAIL_ADDRESS = "AggieSeek <no-reply@email.aggieseek.net>"
 
-def generate_notification(uid, section, prev):
-    timestamp = datetime.strftime(datetime.utcnow(), '%Y-%m-%dT%H:%M:%SZ')
-    db_ref = db.reference(f'users/{uid}/notifications/{timestamp} {section["CRN"]}')
+PRODUCTION_MODE = os.getenv('PRODUCTION_MODE', 'off')
 
-    db_ref.set({
-        'title': section['SUBJECT_CODE'] + " " + section['COURSE_NUMBER'],
-        'timestamp': timestamp,
-        'crn': section['CRN'],
-        'message': f'Seats {get_keyword(prev, section["SEATS"]["REMAINING"])[1]}',
-        'origSeats': prev,
-        'newSeats': section['SEATS']['REMAINING']
-    })
-
+production = PRODUCTION_MODE == 'on'
+twilio_client = Client(ACCOUNT_SID, AUTH_TOKEN)
 
 def get_keyword(prev, curr):
     if prev <= 0 < curr:
@@ -42,23 +41,121 @@ def get_keyword(prev, curr):
 
     return keyword
 
+class NotiType(Enum):
+    TEXT, DISCORD, EMAIL = range(3)
 
-def send_message(to, section, prev):
-    curr = section["SEATS"]["REMAINING"]
-    full_name = section['SUBJECT_CODE'] + " " + section['COURSE_NUMBER']
-    emoji, keyword = get_keyword(prev, curr)
+class Notification:
+    def __init__(self, section: dict, previous, current, noti_type: NotiType, destination: str):
+        self.section = section
+        self.previous = previous
+        self.current = current
+        self.type = noti_type
+        self.destination = destination
 
-    message = client.messages.create(
-        from_=PHONE_NUMBER,
-        body=f'{emoji} {full_name} - {section["CRN"]} - {section["INSTRUCTOR"].strip()} has {keyword}!\n{prev} → {curr}',
-        to=to
-    )
+    def to_tuple(self):
+        return (self.section['CRN'], self.previous, self.current, self.type, self.destination)
 
-    return message.sid
+    def send(self):
+        if self.type == NotiType.TEXT:
+            message = self.generate_text()
+            self.send_text(message)
+        elif self.type == NotiType.DISCORD:
+            embed = self.generate_discord()
+            self.send_discord(embed)
+        elif self.type == NotiType.EMAIL:
+            pass
+            # subject, message = self.generate_email()
+            # self.send_email(subject, message)
 
+    def send_text(self, message):
+        logging.debug(f'Sending text message to {self.destination}')
+        if not production: return
 
-def send_discord(webhook, alert_embed):
-    post_request = requests.post(webhook, json=alert_embed)
-    status_code = post_request.status_code
+        message = twilio_client.messages.create(
+            from_=PHONE_NUMBER,
+            body=message,
+            to=self.destination
+        )
 
-    return status_code
+        return message.sid
+
+    def send_email(self, subject, message):
+        logging.debug(f'Sending email to {self.destination}')
+        if not production: return
+
+        try:
+            post_request = requests.post(MAILGUN_API_URL, auth=("api", MAILGUN_API_KEY),
+                                        data={
+                                            "from": FROM_EMAIL_ADDRESS,
+                                            "to": self.destination,
+                                            "subject": subject,
+                                            "text": message
+                                        })
+            if post_request.status_code == 200:
+                logging.info(f'Successfully sent an email to {self.destination} via Mailgun API.')
+            else:
+                logging.error(f'Could not send the email to {self.destination}, reason: {post_request.text}')
+        except Exception as ex:
+            logging.exception(f'Mailgun error: {ex}')
+
+    def send_discord(self, embed):
+        logging.debug(f'Sending discord message to {self.destination}')
+        if not production: return
+    
+        post_request = requests.post(self.destination, json=embed)
+        status_code = post_request.status_code
+
+        return status_code
+
+class SeatNotification(Notification):
+    def generate_text(self):
+        emoji, text = get_keyword(self.previous, self.current)
+        course = self.section['SUBJECT_CODE'] + " " + self.section['COURSE_NUMBER']
+        return f"{emoji} {course} / {self.section['COURSE_TITLE']} / {self.section['CRN']}\n{self.section['INSTRUCTOR']} has {text}!\n{self.previous} -> {self.current} https://aggieseek.net"
+    
+    def generate_discord(self):
+        return seats_embed(self.section, self.previous, self.current)
+    
+    def generate_email(self):
+        pass
+
+class InstructorNotification(Notification):
+    def generate_text(self):
+        course = self.section['SUBJECT_CODE'] + " " + self.section['COURSE_NUMBER']
+        return f"{course} / {self.section['COURSE_TITLE']} / {self.section['CRN']}\nInstructor has changed!\n{self.previous} -> {self.current}"
+    
+    def generate_discord(self):
+        return instructor_embed(self.section, self.previous, self.current)
+
+    def generate_email(self):
+        pass
+
+def generate_seat_web(uid, section, previous, current):
+    if not production: return
+
+    timestamp = datetime.strftime(datetime.utcnow(), '%Y-%m-%dT%H:%M:%SZ')
+    db_ref = db.reference(f'users/{uid}/notifications/{timestamp} {section["CRN"]}')
+
+    db_ref.set({
+        'title': section['SUBJECT_CODE'] + " " + section['COURSE_NUMBER'],
+        'timestamp': timestamp,
+        'crn': section['CRN'],
+        'message': f'Seats {get_keyword(previous, current)[1]}',
+        'origSeats': previous,
+        'newSeats': current
+    })
+
+def generate_instructor_web(uid, section, previous, current):
+    if not production: return
+
+    timestamp = datetime.strftime(datetime.utcnow(), '%Y-%m-%dT%H:%M:%SZ')
+    db_ref = db.reference(f'users/{uid}/notifications/{timestamp} {section["CRN"]}')
+
+    db_ref.set({
+        'title': section['SUBJECT_CODE'] + " " + section['COURSE_NUMBER'],
+        'timestamp': timestamp,
+        'crn': section['CRN'],
+        'message': f'Instructor changed',
+        'origSeats': previous,
+        'newSeats': current
+    })

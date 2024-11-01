@@ -60,7 +60,7 @@ async def get_section_info(term, crn):
             if instructor_result and instructor_result.get('SWV_CLASS_SEARCH_INSTRCTR_JSON', None):
                 unparsed_json = instructor_result['SWV_CLASS_SEARCH_INSTRCTR_JSON']
                 parsed_json = recursive_parse_json(unparsed_json)[0]
-                instructor = parsed_json['NAME'].rstrip('(P)')
+                instructor = parsed_json['NAME'].rstrip('(P)').strip()
         
         async with session.get(compass_url) as response:
             try:
