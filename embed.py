@@ -10,7 +10,22 @@ INCREASE_EMOJI = '<:yes:1171343018880667669>'
 NO_CHANGE_EMOJI = '<:maybe:1171343019665014805>'
 DECREASE_EMOJI = '<:no:1171343016980643872>'
 
-def parse_title(section: Dict, title: str) -> str:
+def generate_link(term_code):
+    semesters = ['Spring', 'Summer', 'Fall', 'Full Yr Professional']
+    locations = ['College Station', 'Galveston', 'Qatar', '', 'Half Year Term']
+
+    term_code = str(term_code)
+    year = int(term_code[:4])
+    semester = semesters[int(term_code[4]) - 1]
+    location = locations[int(term_code[5]) - 1]
+    
+    if int(term_code[4]) == 4:
+        term_string = f'{semester} {year}-{year + 1}'
+    else:
+        term_string = f'{semester} {year} - {location}'
+    return f'https://tamu.collegescheduler.com/terms/{term_string}/options'
+
+def format_title(section: Dict, title: str) -> str:
     title = title.replace('%t', section['COURSE_TITLE'])
     title = title.replace('%c', str(section['CRN']))
     title = title.replace('%C', section['SUBJECT_CODE'] + " " + section['COURSE_NUMBER'])
@@ -19,19 +34,8 @@ def parse_title(section: Dict, title: str) -> str:
 
     return title
 
-
-def console_embed(logs) -> dict:
-    logs_joined = '\n'.join(logs)
-    return {
-        "avatar_url": AGGIESEEK_LOGO,
-        "username": "AggieSeek",
-        "content": f'```{logs_joined}```'
-    }
-
-def update_embed(section, prev) -> dict:
-    curr = section['SEATS']['REMAINING']
-    change_symbol = INCREASE_EMOJI if curr > prev else DECREASE_EMOJI if curr < prev else NO_CHANGE_EMOJI
-    title = parse_title(section, '%C - %c - %p')
+def instructor_embed(section, previous, current) -> dict:
+    title = format_title(section, '%C - %c - %p')
 
     return {
         "avatar_url": AGGIESEEK_LOGO_LARGE,
@@ -43,16 +47,49 @@ def update_embed(section, prev) -> dict:
             },
             "color": COURSE_COLOR,
             "title": title,
-            "description": f'{change_symbol} **CHANGE DETECTED** {change_symbol}',
+            "description": '**INSTRUCTOR CHANGED**',
             "fields": [
                 {
                     "name": "Previous",
-                    "value": prev,
+                    "value": previous,
                     "inline": True
                 },
                 {
                     "name": "Current",
-                    "value": curr,
+                    "value": current,
+                    "inline": True
+                }
+            ],
+            "thumbnail": {
+                "url": AGGIESEEK_LOGO_LARGE
+            }
+        }]
+    }
+
+def seats_embed(section, previous, current) -> dict:
+    change_symbol = INCREASE_EMOJI if current > previous else DECREASE_EMOJI if current < previous else NO_CHANGE_EMOJI
+    title = format_title(section, '%C - %c - %p')
+
+    return {
+        "avatar_url": AGGIESEEK_LOGO_LARGE,
+        "username": "AggieSeek",
+        "embeds": [{
+            "author": {
+                "name": 'AggieSeek',
+                "icon_url": AGGIESEEK_LOGO
+            },
+            "color": COURSE_COLOR,
+            "title": title,
+            "description": f'{change_symbol} **SEATS CHANGED** {change_symbol}',
+            "fields": [
+                {
+                    "name": "Previous",
+                    "value": previous,
+                    "inline": True
+                },
+                {
+                    "name": "Current",
+                    "value": current,
                     "inline": True
                 }
             ],
