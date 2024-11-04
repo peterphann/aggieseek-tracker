@@ -7,6 +7,8 @@ from logging_config import init_logging
 from section import get_section_info
 import os
 import asyncio
+from embed import error_embed
+import requests
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
@@ -14,13 +16,13 @@ CURRENT_TERM = os.getenv('CURRENT_TERM')
 BATCH_SIZE = int(os.getenv('BATCH_SIZE'), 10)
 CERTIFICATE_PATH = os.getenv('CERTIFICATE_PATH')
 DATABASE_URL = os.getenv('DATABASE_URL')
+CONSOLE_URL = os.getenv('CONSOLE_URL')
 
 def split_list(arr, batch_size):
     return [arr[i:i + batch_size] for i in range(0, len(arr), batch_size)]
 
 class SectionMonitor:
     def __init__(self, term):
-
         if not firebase_admin._apps:
             cred = credentials.Certificate(CERTIFICATE_PATH)
             firebase_admin.initialize_app(cred, {
@@ -37,10 +39,10 @@ class SectionMonitor:
     async def check_change(self, crn):
         section = await get_section_info(self.term, crn)
         if not section:
-            logging.info(f'Section {crn} is invalid, skipping over')
+            logging.warn(f'Section {crn} is invalid, skipping over')
             return
         
-        logging.info(f'Fetched section {crn}, {section["SUBJECT_CODE"]} {section["COURSE_NUMBER"]} - {section["COURSE_TITLE"]}')
+        logging.debug(f'Fetched section {crn}, {section["SUBJECT_CODE"]} {section["COURSE_NUMBER"]} - {section["COURSE_TITLE"]}')
         
         crn = section['CRN']
 
@@ -146,27 +148,31 @@ class SectionMonitor:
         for notification in self.notifications:
             notification.send()
 
+    
 def main():
     init_logging()
     monitor = SectionMonitor(CURRENT_TERM)
     crns = list(monitor.sections.keys())
     batches = split_list(crns, BATCH_SIZE)
+    start_time = time.time()
+    
+    logging.info(f'Beginning new run / {len(crns)} sections')
     
     async def monitor_sections(crns):
-        tasks = []
-        for crn in crns:
-            tasks.append(monitor.check_change(crn))
+        tasks = [monitor.check_change(crn) for crn in crns]
         await asyncio.gather(*tasks)
-        logging.info(f'Checked batch {crns} in {time.time() - start_time:.2f} secs')
 
-    start_time = time.time()
-    for batch in batches:
-        try:
+    try:
+        for batch in batches:
+            start_batch_time = time.time()
             asyncio.run(monitor_sections(batch))
-        except Exception as e:
-            logging.exception(f'Exception raised while running batch: {e}')
-    monitor.send_notifications()
-
+            logging.info(f'Checked batch {batch} in {time.time() - start_batch_time:.2f} secs')
+        monitor.send_notifications()
+    except Exception as e:
+        logging.exception(f'Exception raised while running batch: {e}')
+        requests.post(CONSOLE_URL, json=error_embed(e))
+        time.sleep(10) # If error, wait 10 seconds before continuing
+    
     runtime = time.time() - start_time
     logging.info(f'RUN FINISHED: {runtime:.2f} secs / {len(crns)} sections | {len(crns) / runtime:.2f} sections / sec | {BATCH_SIZE} batch size')
 

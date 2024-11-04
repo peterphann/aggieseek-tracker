@@ -25,7 +25,12 @@ FROM_EMAIL_ADDRESS = "AggieSeek <no-reply@email.aggieseek.net>"
 PRODUCTION_MODE = os.getenv('PRODUCTION_MODE', 'off')
 
 production = PRODUCTION_MODE == 'on'
+print(f'You are running in {"production" if production else "development"} mode.')
+
+
 twilio_client = Client(ACCOUNT_SID, AUTH_TOKEN)
+twilio_logger = logging.getLogger('twilio.http_client')
+twilio_logger.setLevel(logging.DEBUG)
 
 def get_keyword(prev, curr):
     if prev <= 0 < curr:
@@ -68,7 +73,7 @@ class Notification:
             # self.send_email(subject, message)
 
     def send_text(self, message):
-        logging.debug(f'Sending text message to {self.destination}')
+        logging.info(f'Sending text message to {self.destination}')
         if not production: return
 
         message = twilio_client.messages.create(
@@ -80,7 +85,7 @@ class Notification:
         return message.sid
 
     def send_email(self, subject, message):
-        logging.debug(f'Sending email to {self.destination}')
+        logging.info(f'Sending email to {self.destination}')
         if not production: return
 
         try:
@@ -99,7 +104,7 @@ class Notification:
             logging.exception(f'Mailgun error: {ex}')
 
     def send_discord(self, embed):
-        logging.debug(f'Sending discord message to {self.destination}')
+        logging.info(f'Sending discord message to {self.destination}')
         if not production: return
     
         post_request = requests.post(self.destination, json=embed)
