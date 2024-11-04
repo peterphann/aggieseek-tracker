@@ -1,7 +1,12 @@
 # lambda base image for Docker from AWS
-FROM public.ecr.aws/lambda/python:3.11
-COPY requirements.txt ${LAMBDA_TASK_ROOT}
-RUN pip install -r requirements.txt
-COPY / ${LAMBDA_TASK_ROOT}
+FROM python:3.12.2-slim
 
-CMD [ "main.handler" ]
+COPY requirements.txt .
+
+RUN pip install -r requirements.txt
+
+COPY . .
+
+RUN chmod +x run.sh
+
+CMD ["./run.sh"]

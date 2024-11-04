@@ -66,6 +66,25 @@ def instructor_embed(section, previous, current) -> dict:
         }]
     }
 
+def error_embed(exception) -> dict:
+    return {
+        "avatar_url": AGGIESEEK_LOGO_LARGE,
+        "username": "AggieSeek",
+        "embeds": [{
+            "author": {
+                "name": 'AggieSeek',
+                "icon_url": AGGIESEEK_LOGO,
+                "url": 'https://aggieseek.net'
+            },
+            "color": COURSE_COLOR,
+            "title": 'EXCEPTION ENCOUNTERED',
+            "description": str(exception),
+            "thumbnail": {
+                "url": AGGIESEEK_LOGO_LARGE
+            }
+        }]
+    }
+
 def seats_embed(section, previous, current) -> dict:
     change_symbol = INCREASE_EMOJI if current > previous else DECREASE_EMOJI if current < previous else NO_CHANGE_EMOJI
     title = format_title(section, '%C - %c - %p')
