@@ -73,7 +73,8 @@ class Notification:
             # self.send_email(subject, message)
 
     def send_text(self, message):
-        logging.info(f'Sending text message to {self.destination}')
+        course = self.section['SUBJECT_CODE'] + " " + self.section['COURSE_NUMBER']
+        logging.info(f'Sending text message to {self.destination} for {self.section['CRN']} / {course}')
         if not production: return
 
         message = twilio_client.messages.create(
@@ -85,7 +86,8 @@ class Notification:
         return message.sid
 
     def send_email(self, subject, message):
-        logging.info(f'Sending email to {self.destination}')
+        course = self.section['SUBJECT_CODE'] + " " + self.section['COURSE_NUMBER']
+        logging.info(f'Sending email to {self.destination} for {self.section['CRN']} / {course}')
         if not production: return
 
         try:
@@ -104,7 +106,8 @@ class Notification:
             logging.exception(f'Mailgun error: {ex}')
 
     def send_discord(self, embed):
-        logging.info(f'Sending discord message to {self.destination}')
+        course = self.section['SUBJECT_CODE'] + " " + self.section['COURSE_NUMBER']
+        logging.info(f'Sending discord message to {self.destination} for {self.section['CRN']} / {course}')
         if not production: return
     
         post_request = requests.post(self.destination, json=embed)

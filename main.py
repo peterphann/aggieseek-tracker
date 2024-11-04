@@ -84,7 +84,7 @@ class SectionMonitor:
 
             conditions = user['settings']['notificationModes']
 
-            if (conditions['increase'] and current > previous) or (conditions['decrease'] and current < previous) or (conditions['open'] and previous <= 0 < current) or (conditions['close'] and current <= 0 < previous):
+            if (conditions['open'] and previous <= 0 < current) or (conditions['close'] and current <= 0 < previous):
                 methods = user['methods']
                 generate_seat_web(uid, section, previous, current)
 
