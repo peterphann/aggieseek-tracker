@@ -116,7 +116,7 @@ class SeatNotification(Notification):
     def generate_text(self):
         emoji, text = get_keyword(self.previous, self.current)
         course = self.section['SUBJECT_CODE'] + " " + self.section['COURSE_NUMBER']
-        return f"{emoji} {course} / {self.section['COURSE_TITLE']} / {self.section['CRN']}\n{self.section['INSTRUCTOR']} has {text}!\n{self.previous} -> {self.current} https://aggieseek.net"
+        return f"{emoji} {course} / {self.section['COURSE_TITLE']} / {self.section['CRN']}\n{self.section['INSTRUCTOR']} {text}!\n{self.previous} -> {self.current}"
     
     def generate_discord(self):
         return seats_embed(self.section, self.previous, self.current)
